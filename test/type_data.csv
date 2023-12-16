@@ -1,0 +1,2 @@
+bool,boolPtr,int,intPtr,int8,int8Ptr,int16,int16Ptr,int32,int32Ptr,int64,int64Ptr,uint,uintPtr,uint8,uint8Ptr,uint16,uint16Ptr,uint32,uint32Ptr,uint64,uint64Ptr,float32,float32Ptr,float64,float64Ptr,string,stringPtr
+1,true,1234,1234,127,127,1234,1234,1234,1234,1234,1234,12345,12345,255,255,65535,65535,12345,12345,12345,12345,123.45,123.45,123.45,123.456,hello world,world hello

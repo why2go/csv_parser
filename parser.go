@@ -1,4 +1,4 @@
-package csv_reader
+package csv_parser
 
 import (
 	"context"
@@ -7,21 +7,14 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
-	"unsafe"
+	"sync"
 )
 
-// todo: 可以设置chan的大小
-
-// type Demo struct {
-// 	F1 string `csv:"f1,required"`
-// 	F2 int8   `csv:"-"`
-// }
-
 const (
-	FieldTag = "csv"
-
-	FieldTag_Omit        = "-"        // 如果tag名为此字符，则此字段不参与解析
+	FieldTagKey          = "csv"
+	FieldTagOpt_Omit     = "-"        // 如果tag名为此字符，则此字段不参与解析
 	FieldTagOpt_Required = "required" // 如果tag选项中有此字段，则对应csv文件表头必须有此字段，否则报错
 )
 
@@ -47,44 +40,52 @@ type CsvParser[T any] struct {
 	reader             *csv.Reader             // csv的配置由调用方确定，如分隔符、换行符
 	fileHeaders        []fileHeader            // 文件头及出现的列号
 	fieldHeaders       map[string]*fieldHeader // 结构体T所定义的表头字段
-	totalParsedRecords int                     // 记录已经解析的记录数
+	totalParsedRecords int                     // 记录已经解析的记录数，不包含表头行
 	dataChan           chan *DataWrapper[T]    // 将解析的行数据记录在此通道中
 	targetStructType   reflect.Type            // 想要解析为的目标结构体类型
+	doParseOnce        sync.Once               // 一个parser只允许有一个解析goroutine
 }
 
 // 每行解析出的记录和错误信息，如果解析出错，则err != nil
 type DataWrapper[T any] struct {
-	Record *T
-	Err    error
+	Data *T
+	Err  error
 }
 
-// 创建一个CsvParser，类型T必须是一个struct类型，不允许是指向struct的指针。
+// 创建一个CsvParser，而后应当从DataChan方法中获取逐行解析的记录，类型T必须是一个struct类型，不允许是指向struct的指针。
 // reader指向一个带有表头的csv文件，表头字段应当与T定义的表头在名称上对应，但是二者不必保持顺序上的对应。
-// 如果csv文件中存在未在T中定义的表头，则在解析时忽略此字段信息。
+// 如果csv文件中存在未在T中定义的表头字段，则在解析时忽略文件中定义的此字段信息。
+// T中支持解析的字段类型有：bool,int,int8,int16,int32,int64,uint,uint8,uint16,uint32,uint64,float32,float64,string,
+// 以及它们的指针类型，对于bool类型，合法的值为0,1,true,false，其中0，false表示false; 1，true表示true.
 func NewCsvParser[T any](reader *csv.Reader) (parser *CsvParser[T], err error) {
 	if reader == nil {
 		return nil, errors.New("csv reader is nil")
 	}
-	parser.targetStructType = reflect.TypeOf(new(T)).Elem()
 	parser = &CsvParser[T]{
-		reader:       reader,
-		fieldHeaders: make(map[string]*fieldHeader),
+		reader:           reader,
+		fieldHeaders:     make(map[string]*fieldHeader),
+		dataChan:         make(chan *DataWrapper[T]),
+		targetStructType: reflect.TypeOf(new(T)).Elem(),
 	}
+
 	err = parser.getStructHeaders()
 	if err != nil {
 		parser.err = err
+		close(parser.dataChan)
 		return nil, err
 	}
 
 	err = parser.getFileHeaders()
 	if err != nil {
 		parser.err = err
+		close(parser.dataChan)
 		return nil, err
 	}
 
 	err = parser.validateHeaders()
 	if err != nil {
 		parser.err = err
+		close(parser.dataChan)
 		return nil, err
 	}
 
@@ -128,9 +129,9 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 			header := new(fieldHeader)
 			header.fieldIndex = i
 			header.fieldType = sf.Type
-			if tag, ok := sf.Tag.Lookup(FieldTag); ok {
+			if tag, ok := sf.Tag.Lookup(FieldTagKey); ok {
 				name, opts, _ := strings.Cut(tag, ",")
-				if name == FieldTag_Omit { // 忽略此字段
+				if name == FieldTagOpt_Omit { // 忽略此字段
 					continue
 				}
 				if _, ok := headerNameSet[name]; ok {
@@ -228,19 +229,33 @@ func (parser *CsvParser[T]) GetTotalParsedRecords() int {
 	return parser.totalParsedRecords
 }
 
+// 从channel中不断获取解析的每行数据，可以用于多线程中
+// 如果解析遇到错误，则返回的DataWrapper的Err不为nil，此后解析终止，channel关闭
 func (parser *CsvParser[T]) DataChan(ctx context.Context) <-chan *DataWrapper[T] {
-	if parser.dataChan == nil {
-		parser.dataChan = make(chan *DataWrapper[T])
-	}
-	go func() {
-		defer func() { // 解析出错则发送一个错误，关闭channel
-			if parser.err != nil {
-				parser.dataChan <- &DataWrapper[T]{Err: parser.err}
-				close(parser.dataChan)
-				return
-			}
+	parser.doParseOnce.Do(func() {
+		go func() {
+			parser.doParse(ctx)
 		}()
+	})
 
+	return parser.dataChan
+}
+
+func (parser *CsvParser[T]) doParse(ctx context.Context) {
+	if parser.err != nil {
+		return
+	}
+
+	// 解析出错则发送一个错误，关闭channel
+	defer func() {
+		if parser.err != nil {
+			parser.dataChan <- &DataWrapper[T]{Err: parser.err}
+			close(parser.dataChan)
+			return
+		}
+	}()
+
+	for {
 		record, err := parser.reader.Read()
 		if err == io.EOF { // 成功解析完，则关闭通道
 			close(parser.dataChan)
@@ -251,40 +266,121 @@ func (parser *CsvParser[T]) DataChan(ctx context.Context) <-chan *DataWrapper[T]
 			return
 		}
 		val := reflect.New(parser.targetStructType)
-		// log.Debug().Msgf("target type: %s, %s", target.Type(), target.Kind())
+
 		for j := range record {
 			fileHeader := parser.fileHeaders[j]
 			if fieldHeader, ok := parser.fieldHeaders[fileHeader.name]; !ok {
 				continue // 文件中的多余字段被忽略
 			} else {
 				fieldIdx := fieldHeader.fieldIndex
-				if fieldHeader.fieldType.Kind() == reflect.Pointer {
-					fieldVal := reflect.New(fieldHeader.fieldType)
-					val.Elem().SetPointer(fieldVal.Interface().(unsafe.Pointer))
+				fieldType := fieldHeader.fieldType
+				fieldVal := val.Elem().Field(fieldIdx)
+				if fieldType.Kind() == reflect.Pointer {
+					fieldType = fieldType.Elem()
+					fieldVal = reflect.New(fieldType)
+					val.Elem().Field(fieldIdx).Set(fieldVal)
+					fieldVal = fieldVal.Elem()
 				}
-				switch fieldHeader.fieldType.Kind() {
+				switch fieldType.Kind() {
 				case reflect.Bool:
 					txt := strings.TrimSpace(record[j])
 					var b bool
 					if txt == "true" || txt == "1" {
 						b = true
 					} else if txt != "false" && txt != "0" {
-
+						parser.err = fmt.Errorf("unknown bool value: %s", txt)
+						return
 					}
-					// val.Elem().Field(fieldIdx).
-					val.Elem().Field(fieldIdx).SetBool(b)
+					fieldVal.SetBool(b)
 				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					num, err := parseInt(strings.TrimSpace(record[j]), fieldType.Kind())
+					if err != nil {
+						parser.err = err
+						return
+					}
+					fieldVal.SetInt(num)
 				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					num, err := parseUint(strings.TrimSpace(record[j]), fieldType.Kind())
+					if err != nil {
+						parser.err = err
+						return
+					}
+					fieldVal.SetUint(num)
 				case reflect.Float32, reflect.Float64:
+					num, err := parseFloat(strings.TrimSpace(record[j]), fieldType.Kind())
+					if err != nil {
+						parser.err = err
+						return
+					}
+					fieldVal.SetFloat(num)
 				case reflect.String:
-					val.Elem().Field(fieldIdx).SetString(record[j])
+					fieldVal.SetString(record[j])
 				default:
+					parser.err = fmt.Errorf("unsupported field type kind, name: %v, kind: %v",
+						fieldHeader.name, fieldType.Kind().String())
+					return
 				}
-				val.Elem().Field(fieldIdx).SetString(strings.TrimSpace(record[j])) // 这里对每个字段做了trim space
 			}
 		}
-		// log.Debug().Msgf("reuse: %t", parser.batchItems[i] == target.Interface().(*T))
-		// items = append(items, target.Interface().(*T))
-	}()
-	return parser.dataChan
+
+		parser.totalParsedRecords++
+
+		select {
+		case <-ctx.Done():
+			parser.err = ctx.Err()
+			return
+		case parser.dataChan <- &DataWrapper[T]{Data: val.Interface().(*T), Err: nil}:
+		}
+	}
+}
+
+func parseInt(txt string, kind reflect.Kind) (int64, error) {
+	var bitSize int
+	switch kind {
+	case reflect.Int:
+		bitSize = 0
+	case reflect.Int8:
+		bitSize = 8
+	case reflect.Int16:
+		bitSize = 16
+	case reflect.Int32:
+		bitSize = 32
+	case reflect.Int64:
+		bitSize = 64
+	default:
+		bitSize = 0
+	}
+	return strconv.ParseInt(txt, 10, bitSize)
+}
+
+func parseUint(txt string, kind reflect.Kind) (uint64, error) {
+	var bitSize int
+	switch kind {
+	case reflect.Uint:
+		bitSize = 0
+	case reflect.Uint8:
+		bitSize = 8
+	case reflect.Uint16:
+		bitSize = 16
+	case reflect.Uint32:
+		bitSize = 32
+	case reflect.Uint64:
+		bitSize = 64
+	default:
+		bitSize = 0
+	}
+	return strconv.ParseUint(txt, 10, bitSize)
+}
+
+func parseFloat(txt string, kind reflect.Kind) (float64, error) {
+	var bitSize int
+	switch kind {
+	case reflect.Float32:
+		bitSize = 32
+	case reflect.Float64:
+		bitSize = 64
+	default:
+		bitSize = 32
+	}
+	return strconv.ParseFloat(txt, bitSize)
 }
