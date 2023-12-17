@@ -45,7 +45,7 @@ type Demo struct {
 	Ignored    string   `csv:"-"`
 }
 
-func TestAllType(t *testing.T) {
+func TestAllPrimitiveType(t *testing.T) {
 	var err error
 	f, err := os.Open("./type_data.csv")
 	assert.Empty(t, err)
@@ -53,6 +53,7 @@ func TestAllType(t *testing.T) {
 
 	parser, err := csv_parser.NewCsvParser[Demo](r)
 	assert.Empty(t, err)
+	defer parser.Close()
 
 	for dataWrapper := range parser.DataChan(context.Background()) {
 		assert.Empty(t, dataWrapper.Err)
@@ -73,13 +74,14 @@ func TestSlice(t *testing.T) {
 10,11,12
 `
 	type Demo struct {
-		Nums []int64 `csv:"nums"`
+		Nums []*int64 `csv:"nums"`
 	}
 
 	r := csv.NewReader(bytes.NewBufferString(data))
 
 	parser, err := csv_parser.NewCsvParser[Demo](r)
 	assert.Empty(t, err)
+	defer parser.Close()
 
 	for dataWrapper := range parser.DataChan(context.Background()) {
 		assert.Empty(t, dataWrapper.Err)
@@ -93,21 +95,22 @@ func TestSlice(t *testing.T) {
 }
 
 func TestMap(t *testing.T) {
-	data := `id,{{attri:age}},{{attri:height}}
-001,20,180
-002,21,175
-003,22,189
-004,23,172
+	data := `name,{{attri:age}},{{attri:height}},[[msg]],[[msg]]
+Alice,20,180,"Hi, I'm Alice.",Nice to meet you!
+Bob,21,175,"Hi, I'm Bob.",Nice to meet you!
+Candy,22,189,"Hi, I'm Candy.",Nice to meet you!
+David,23,172,"Hi, I'm David.",Nice to meet you!
 `
 	type Demo struct {
-		Id    string           `csv:"id" json:"id"`
+		Name  string           `csv:"name" json:"name"`
 		Attri map[string]int16 `csv:"attri" json:"attri"`
+		Msg   []string         `csv:"msg" json:"msg"`
 	}
-
 	r := csv.NewReader(bytes.NewBufferString(data))
 
 	parser, err := csv_parser.NewCsvParser[Demo](r)
 	assert.Empty(t, err)
+	defer parser.Close()
 
 	fmt.Printf("parser.FieldHeaders(): %v\n", parser.FieldHeaders())
 

@@ -346,21 +346,23 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 			} else {
 				var (
 					fieldType     = fieldHeader.fieldType
-					primitiveKind = fieldType.Kind()
+					primitiveType = fieldType
 					fieldIdx      = fieldHeader.fieldIndex
 					fieldVal      = val.Elem().Field(fieldIdx)
 				)
 				if fieldType.Kind() == reflect.Pointer { // 处理基本类型的指针
-					fieldType = fieldType.Elem()
-					fieldVal = reflect.New(fieldType)
-					val.Elem().Field(fieldIdx).Set(fieldVal)
-					fieldVal = fieldVal.Elem()
-					primitiveKind = fieldType.Kind()
+					primitiveType = fieldType.Elem()
+					v := reflect.New(primitiveType)
+					fieldVal.Set(v)
+					fieldVal = v.Elem()
 				}
 				if fieldType.Kind() == reflect.Slice || fieldType.Kind() == reflect.Map { // 处理slice、map
-					primitiveKind = fieldType.Elem().Kind()
+					primitiveType = fieldType.Elem()
+					if primitiveType.Kind() == reflect.Pointer {
+						primitiveType = primitiveType.Elem()
+					}
 				}
-				val, err := parsePrimitive(strings.TrimSpace(record[j]), primitiveKind)
+				val, err := parsePrimitive(strings.TrimSpace(record[j]), primitiveType)
 				if err != nil {
 					parser.err = err
 					return
@@ -368,14 +370,24 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 
 				switch fieldType.Kind() {
 				case reflect.Slice:
-					fieldVal.Set(reflect.Append(fieldVal, val.Convert(fieldType.Elem())))
+					if fieldType.Elem().Kind() == reflect.Pointer {
+						v := reflect.New(primitiveType)
+						v.Elem().Set(val)
+						val = v
+					}
+					fieldVal.Set(reflect.Append(fieldVal, val))
 				case reflect.Map:
 					if fieldVal.IsNil() {
 						fieldVal.Set(reflect.MakeMap(fieldType))
 					}
-					fieldVal.SetMapIndex(reflect.ValueOf(fileHeader.mapKey), val.Convert(fieldType.Elem()))
+					if fieldType.Elem().Kind() == reflect.Pointer {
+						v := reflect.New(primitiveType)
+						v.Elem().Set(val)
+						val = v
+					}
+					fieldVal.SetMapIndex(reflect.ValueOf(fileHeader.mapKey), val)
 				default:
-					fieldVal.Set(val.Convert(fieldType))
+					fieldVal.Set(val)
 				}
 			}
 		}
@@ -394,8 +406,9 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 	}
 }
 
-func parsePrimitive(txt string, fieldKind reflect.Kind) (val reflect.Value, err error) {
+func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err error) {
 	var v any
+	fieldKind := fieldType.Kind()
 	switch fieldKind {
 	case reflect.Bool:
 		txt := strings.TrimSpace(txt)
@@ -417,7 +430,7 @@ func parsePrimitive(txt string, fieldKind reflect.Kind) (val reflect.Value, err 
 	default:
 		v, err = nil, fmt.Errorf("unsupported primitive field type kind, kind: %v", fieldKind.String())
 	}
-	return reflect.ValueOf(v), nil
+	return reflect.ValueOf(v).Convert(fieldType), nil
 }
 
 func parseInt(txt string, kind reflect.Kind) (int64, error) {
