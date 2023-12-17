@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,11 @@ const (
 	FieldTagKey          = "csv"
 	FieldTagOpt_Omit     = "-"        // 如果tag名为此字符，则此字段不参与解析
 	FieldTagOpt_Required = "required" // 如果tag选项中有此字段，则对应csv文件表头必须有此字段，否则报错
+)
+
+var (
+	sliceRegex = regexp.MustCompile(`^\[\[[\w:-]+\]\]$`)    // csv文件中，如果表头字段类型为slice，其表头名应该满足的格式，如[[nums]]
+	mapRegex   = regexp.MustCompile(`^{{[\w-]+:[\w-:]+}}$`) // csv文件中，如果表头字段类型为map，其表头名应该满足的格式，如{{map1:key1}}
 )
 
 // 记录目标结构体中定义的header信息
@@ -32,7 +38,16 @@ func (fh *fieldHeader) String() string {
 
 // 记录csv文件的header信息
 type fileHeader struct {
-	name string
+	name       string // 一般对应到struct结构体中的tag名，map类型表示mapName:keyName
+	fullName   string // 原始的表头名，对于slice和map，相较于name，该字段会有前缀和后缀字符
+	matchSlice bool   // 表头形式是否匹配到slice表头格式
+	matchMap   bool   // 表头形式是否匹配到map表头格式
+	mapName    string // 如果是map形式，该字段表示对应到结构体中的tag名
+	mapKey     string // 如果是map形式，该字段表示map中的key
+}
+
+func (fh *fileHeader) String() string {
+	return fmt.Sprintf("{name: %s, fullName: %s}", fh.name, fh.fullName)
 }
 
 type CsvParser[T any] struct {
@@ -44,6 +59,7 @@ type CsvParser[T any] struct {
 	dataChan           chan *DataWrapper[T]    // 将解析的行数据记录在此通道中
 	targetStructType   reflect.Type            // 想要解析为的目标结构体类型
 	doParseOnce        sync.Once               // 一个parser只允许有一个解析goroutine
+	closeCh            chan bool               // 主动关闭解析过程，防止内存泄漏
 }
 
 // 每行解析出的记录和错误信息，如果解析出错，则err != nil
@@ -66,6 +82,7 @@ func NewCsvParser[T any](reader *csv.Reader) (parser *CsvParser[T], err error) {
 		fieldHeaders:     make(map[string]*fieldHeader),
 		dataChan:         make(chan *DataWrapper[T]),
 		targetStructType: reflect.TypeOf(new(T)).Elem(),
+		closeCh:          make(chan bool),
 	}
 
 	err = parser.getStructHeaders()
@@ -92,6 +109,11 @@ func NewCsvParser[T any](reader *csv.Reader) (parser *CsvParser[T], err error) {
 	return parser, nil
 }
 
+func (parser *CsvParser[T]) Close() error {
+	close(parser.closeCh)
+	return nil
+}
+
 // 返回所有从目标结构体中得到的文件头字段，此函数通常用于排查问题
 func (parser *CsvParser[T]) FieldHeaders() []string {
 	var hds []string
@@ -105,7 +127,7 @@ func (parser *CsvParser[T]) FieldHeaders() []string {
 func (parser *CsvParser[T]) FileHeaders() []string {
 	var hds []string
 	for _, v := range parser.fileHeaders {
-		hds = append(hds, v.name)
+		hds = append(hds, v.String())
 	}
 	return hds
 }
@@ -147,7 +169,7 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 				header.name = sf.Name
 				b := []byte(header.name)
 				if 'A' <= b[0] && b[0] <= 'Z' { // 将首字母小写
-					b[0] = (b[0] + 32)
+					b[0] = (b[0] + 'a' - 'A')
 				}
 			}
 			parser.fieldHeaders[header.name] = header
@@ -161,23 +183,30 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 
 // 支持 string, int, uint, float, bool 以及它们的指针类型
 func (parser *CsvParser[T]) isSupportedStructFieldType(typ reflect.Type) bool {
-	if typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
+	isPrimitiveType := func(typ reflect.Type) bool {
+		if typ.Kind() == reflect.Pointer {
+			typ = typ.Elem()
+		}
+		return typ.Kind() == reflect.String ||
+			typ.Kind() == reflect.Int ||
+			typ.Kind() == reflect.Int8 ||
+			typ.Kind() == reflect.Int16 ||
+			typ.Kind() == reflect.Int32 ||
+			typ.Kind() == reflect.Int64 ||
+			typ.Kind() == reflect.Uint ||
+			typ.Kind() == reflect.Uint8 ||
+			typ.Kind() == reflect.Uint16 ||
+			typ.Kind() == reflect.Uint32 ||
+			typ.Kind() == reflect.Uint64 ||
+			typ.Kind() == reflect.Float32 ||
+			typ.Kind() == reflect.Float64 ||
+			typ.Kind() == reflect.Bool
 	}
-	return typ.Kind() == reflect.String ||
-		typ.Kind() == reflect.Int ||
-		typ.Kind() == reflect.Int8 ||
-		typ.Kind() == reflect.Int16 ||
-		typ.Kind() == reflect.Int32 ||
-		typ.Kind() == reflect.Int64 ||
-		typ.Kind() == reflect.Uint ||
-		typ.Kind() == reflect.Uint8 ||
-		typ.Kind() == reflect.Uint16 ||
-		typ.Kind() == reflect.Uint32 ||
-		typ.Kind() == reflect.Uint64 ||
-		typ.Kind() == reflect.Float32 ||
-		typ.Kind() == reflect.Float64 ||
-		typ.Kind() == reflect.Bool
+
+	return isPrimitiveType(typ) ||
+		(typ.Kind() == reflect.Slice && isPrimitiveType(typ.Elem())) ||
+		(typ.Kind() == reflect.Map && typ.Key().Kind() == reflect.String && isPrimitiveType(typ.Elem()))
+
 }
 
 // 读取csv文件中的header，表头字段不允许有重复
@@ -188,22 +217,40 @@ func (parser *CsvParser[T]) getFileHeaders() error {
 		return err
 	}
 	for i := range record {
-		parser.fileHeaders = append(parser.fileHeaders, fileHeader{name: strings.TrimSpace(record[i])})
+		fullName := strings.TrimSpace(record[i])
+		fh := fileHeader{fullName: fullName}
+		if sliceRegex.MatchString(fullName) { // 匹配到slice
+			fh.name = fullName[2 : len(fullName)-2]
+			fh.matchSlice = true
+		} else if mapRegex.MatchString(fullName) { // 匹配到map
+			fh.name = fullName[2 : len(fullName)-2]
+			fh.matchMap = true
+			var found bool
+			fh.mapName, fh.mapKey, found = strings.Cut(fh.name, ":")
+			if !found {
+				return fmt.Errorf("malformed map header: %s", fh.fullName)
+			}
+		} else {
+			fh.name = fh.fullName
+		}
+		parser.fileHeaders = append(parser.fileHeaders, fh)
 	}
 	// 校验文件中解析的头部是否重复
-	fileHeaderSet := make(map[fileHeader]struct{})
+	fileHeaderSet := make(map[string]struct{})
 	for i := range parser.fileHeaders {
-		if _, ok := fileHeaderSet[parser.fileHeaders[i]]; ok {
-			return fmt.Errorf("duplicate csv file header: %s", parser.fileHeaders[i].name)
+		if parser.fileHeaders[i].matchSlice { // slice无需检查重复
+			continue
+		}
+		if _, ok := fileHeaderSet[parser.fileHeaders[i].name]; ok {
+			return fmt.Errorf("duplicate csv file header: %s", parser.fileHeaders[i].fullName)
 		} else {
-			fileHeaderSet[parser.fileHeaders[i]] = struct{}{}
+			fileHeaderSet[parser.fileHeaders[i].name] = struct{}{}
 		}
 	}
 	return nil
 }
 
 func (parser *CsvParser[T]) validateHeaders() error {
-	// 匹配required选项
 	requiredSet := map[string]struct{}{}
 	for _, v := range parser.fieldHeaders {
 		if v.required {
@@ -211,6 +258,7 @@ func (parser *CsvParser[T]) validateHeaders() error {
 		}
 	}
 
+	// 匹配required选项
 	for i := range parser.fileHeaders {
 		delete(requiredSet, parser.fileHeaders[i].name)
 	}
@@ -220,6 +268,24 @@ func (parser *CsvParser[T]) validateHeaders() error {
 			keys = append(keys, k)
 		}
 		return fmt.Errorf("some required headers not foun in csv file header: %v", strings.Join(keys, ","))
+	}
+
+	// 校验slice字段和map字段
+	for i := range parser.fileHeaders {
+		if parser.fileHeaders[i].matchSlice {
+			if hd, ok := parser.fieldHeaders[parser.fileHeaders[i].name]; ok {
+				if hd.fieldType.Kind() != reflect.Slice {
+					return fmt.Errorf("field %s is not a slice", parser.fileHeaders[i].fullName)
+				}
+			}
+		}
+		if parser.fileHeaders[i].matchMap {
+			if hd, ok := parser.fieldHeaders[parser.fileHeaders[i].name]; ok {
+				if hd.fieldType.Kind() != reflect.Map {
+					return fmt.Errorf("field %s is not a map", parser.fileHeaders[i].fullName)
+				}
+			}
+		}
 	}
 
 	return nil
@@ -269,56 +335,47 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 
 		for j := range record {
 			fileHeader := parser.fileHeaders[j]
-			if fieldHeader, ok := parser.fieldHeaders[fileHeader.name]; !ok {
+			var name string
+			if fileHeader.matchMap {
+				name = fileHeader.mapName
+			} else {
+				name = fileHeader.name
+			}
+			if fieldHeader, ok := parser.fieldHeaders[name]; !ok {
 				continue // 文件中的多余字段被忽略
 			} else {
-				fieldIdx := fieldHeader.fieldIndex
-				fieldType := fieldHeader.fieldType
-				fieldVal := val.Elem().Field(fieldIdx)
-				if fieldType.Kind() == reflect.Pointer {
+				var (
+					fieldType     = fieldHeader.fieldType
+					primitiveKind = fieldType.Kind()
+					fieldIdx      = fieldHeader.fieldIndex
+					fieldVal      = val.Elem().Field(fieldIdx)
+				)
+				if fieldType.Kind() == reflect.Pointer { // 处理基本类型的指针
 					fieldType = fieldType.Elem()
 					fieldVal = reflect.New(fieldType)
 					val.Elem().Field(fieldIdx).Set(fieldVal)
 					fieldVal = fieldVal.Elem()
+					primitiveKind = fieldType.Kind()
 				}
-				switch fieldType.Kind() {
-				case reflect.Bool:
-					txt := strings.TrimSpace(record[j])
-					var b bool
-					if txt == "true" || txt == "1" {
-						b = true
-					} else if txt != "false" && txt != "0" {
-						parser.err = fmt.Errorf("unknown bool value: %s", txt)
-						return
-					}
-					fieldVal.SetBool(b)
-				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					num, err := parseInt(strings.TrimSpace(record[j]), fieldType.Kind())
-					if err != nil {
-						parser.err = err
-						return
-					}
-					fieldVal.SetInt(num)
-				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					num, err := parseUint(strings.TrimSpace(record[j]), fieldType.Kind())
-					if err != nil {
-						parser.err = err
-						return
-					}
-					fieldVal.SetUint(num)
-				case reflect.Float32, reflect.Float64:
-					num, err := parseFloat(strings.TrimSpace(record[j]), fieldType.Kind())
-					if err != nil {
-						parser.err = err
-						return
-					}
-					fieldVal.SetFloat(num)
-				case reflect.String:
-					fieldVal.SetString(record[j])
-				default:
-					parser.err = fmt.Errorf("unsupported field type kind, name: %v, kind: %v",
-						fieldHeader.name, fieldType.Kind().String())
+				if fieldType.Kind() == reflect.Slice || fieldType.Kind() == reflect.Map { // 处理slice、map
+					primitiveKind = fieldType.Elem().Kind()
+				}
+				val, err := parsePrimitive(strings.TrimSpace(record[j]), primitiveKind)
+				if err != nil {
+					parser.err = err
 					return
+				}
+
+				switch fieldType.Kind() {
+				case reflect.Slice:
+					fieldVal.Set(reflect.Append(fieldVal, val.Convert(fieldType.Elem())))
+				case reflect.Map:
+					if fieldVal.IsNil() {
+						fieldVal.Set(reflect.MakeMap(fieldType))
+					}
+					fieldVal.SetMapIndex(reflect.ValueOf(fileHeader.mapKey), val.Convert(fieldType.Elem()))
+				default:
+					fieldVal.Set(val.Convert(fieldType))
 				}
 			}
 		}
@@ -329,9 +386,38 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 		case <-ctx.Done():
 			parser.err = ctx.Err()
 			return
+		case <-parser.closeCh:
+			parser.err = fmt.Errorf("parser already closed")
+			return
 		case parser.dataChan <- &DataWrapper[T]{Data: val.Interface().(*T), Err: nil}:
 		}
 	}
+}
+
+func parsePrimitive(txt string, fieldKind reflect.Kind) (val reflect.Value, err error) {
+	var v any
+	switch fieldKind {
+	case reflect.Bool:
+		txt := strings.TrimSpace(txt)
+		if txt == "true" || txt == "1" {
+			v, err = true, nil
+		} else if txt != "false" && txt != "0" {
+			v, err = nil, fmt.Errorf("unknown bool value: %s", txt)
+		} else {
+			v, err = false, nil
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v, err = parseInt(strings.TrimSpace(txt), fieldKind)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v, err = parseUint(strings.TrimSpace(txt), fieldKind)
+	case reflect.Float32, reflect.Float64:
+		v, err = parseFloat(strings.TrimSpace(txt), fieldKind)
+	case reflect.String:
+		v, err = txt, nil
+	default:
+		v, err = nil, fmt.Errorf("unsupported primitive field type kind, kind: %v", fieldKind.String())
+	}
+	return reflect.ValueOf(v), nil
 }
 
 func parseInt(txt string, kind reflect.Kind) (int64, error) {

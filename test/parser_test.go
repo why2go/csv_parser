@@ -1,6 +1,7 @@
 package test
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -52,6 +53,65 @@ func TestAllType(t *testing.T) {
 
 	parser, err := csv_parser.NewCsvParser[Demo](r)
 	assert.Empty(t, err)
+
+	for dataWrapper := range parser.DataChan(context.Background()) {
+		assert.Empty(t, dataWrapper.Err)
+		b, err := json.Marshal(dataWrapper.Data)
+		assert.Empty(t, err)
+
+		fmt.Printf("demo: %s\n", string(b))
+	}
+
+	fmt.Printf("done\n")
+}
+
+func TestSlice(t *testing.T) {
+	data := `[[nums]],[[nums]],[[nums]]
+1,2,3
+4,5,6
+7,8,9
+10,11,12
+`
+	type Demo struct {
+		Nums []int64 `csv:"nums"`
+	}
+
+	r := csv.NewReader(bytes.NewBufferString(data))
+
+	parser, err := csv_parser.NewCsvParser[Demo](r)
+	assert.Empty(t, err)
+
+	for dataWrapper := range parser.DataChan(context.Background()) {
+		assert.Empty(t, dataWrapper.Err)
+		b, err := json.Marshal(dataWrapper.Data)
+		assert.Empty(t, err)
+
+		fmt.Printf("demo: %s\n", string(b))
+	}
+
+	fmt.Printf("done\n")
+}
+
+func TestMap(t *testing.T) {
+	data := `id,{{attri:age}},{{attri:height}}
+001,20,180
+002,21,175
+003,22,189
+004,23,172
+`
+	type Demo struct {
+		Id    string           `csv:"id" json:"id"`
+		Attri map[string]int16 `csv:"attri" json:"attri"`
+	}
+
+	r := csv.NewReader(bytes.NewBufferString(data))
+
+	parser, err := csv_parser.NewCsvParser[Demo](r)
+	assert.Empty(t, err)
+
+	fmt.Printf("parser.FieldHeaders(): %v\n", parser.FieldHeaders())
+
+	fmt.Printf("parser.FileHeaders(): %v\n", parser.FileHeaders())
 
 	for dataWrapper := range parser.DataChan(context.Background()) {
 		assert.Empty(t, dataWrapper.Err)
