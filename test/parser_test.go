@@ -126,3 +126,37 @@ David,23,172,"Hi, I'm David.",Nice to meet you!
 
 	fmt.Printf("done\n")
 }
+
+func TestNil(t *testing.T) {
+	data := `name,{{attri:age}},{{attri:height}},[[msg]],[[msg]],num
+Alice,,180,"Hi, I'm Alice.",Nice to meet you!,
+Bob,21,175,"Hi, I'm Bob.",,2
+Candy,22,189,"Hi, I'm Candy.",Nice to meet you!,3
+,23,,"Hi, I'm David.",Nice to meet you!,
+`
+	type Demo struct {
+		Name  *string           `csv:"name" json:"name"`
+		Attri map[string]*int16 `csv:"attri" json:"attri"`
+		Msg   []*string         `csv:"msg" json:"msg"`
+		Num   *int16            `csv:"num" json:"num"`
+	}
+	r := csv.NewReader(bytes.NewBufferString(data))
+
+	parser, err := csv_parser.NewCsvParser[Demo](r)
+	assert.Empty(t, err)
+	defer parser.Close()
+
+	fmt.Printf("parser.FieldHeaders(): %v\n", parser.FieldHeaders())
+
+	fmt.Printf("parser.FileHeaders(): %v\n", parser.FileHeaders())
+
+	for dataWrapper := range parser.DataChan(context.Background()) {
+		assert.Empty(t, dataWrapper.Err)
+		b, err := json.Marshal(dataWrapper.Data)
+		assert.Empty(t, err)
+
+		fmt.Printf("demo: %s\n", string(b))
+	}
+
+	fmt.Printf("done\n")
+}

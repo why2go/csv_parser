@@ -352,6 +352,11 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 				)
 				if fieldType.Kind() == reflect.Pointer { // 处理基本类型的指针
 					primitiveType = fieldType.Elem()
+					// 字段值为空时，保持nil
+					if (record[j] == "" && primitiveType.Kind() == reflect.String) ||
+						(strings.TrimSpace(record[j]) == "" && primitiveType.Kind() != reflect.String) {
+						continue
+					}
 					v := reflect.New(primitiveType)
 					fieldVal.Set(v)
 					fieldVal = v.Elem()
@@ -360,9 +365,15 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 					primitiveType = fieldType.Elem()
 					if primitiveType.Kind() == reflect.Pointer {
 						primitiveType = primitiveType.Elem()
+						// 字段值为空时，保持nil
+						if (record[j] == "" && primitiveType.Kind() == reflect.String) ||
+							(strings.TrimSpace(record[j]) == "" && primitiveType.Kind() != reflect.String) {
+							continue
+						}
 					}
 				}
-				val, err := parsePrimitive(strings.TrimSpace(record[j]), primitiveType)
+
+				val, err := parsePrimitive(record[j], primitiveType)
 				if err != nil {
 					parser.err = err
 					return
@@ -429,6 +440,9 @@ func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err 
 		v, err = txt, nil
 	default:
 		v, err = nil, fmt.Errorf("unsupported primitive field type kind, kind: %v", fieldKind.String())
+	}
+	if err != nil {
+		return reflect.Value{}, err
 	}
 	return reflect.ValueOf(v).Convert(fieldType), nil
 }
