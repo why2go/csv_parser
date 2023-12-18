@@ -135,10 +135,10 @@ Bob,21,175,"Hi, I'm Bob.",,2
  ,23,,"Hi, I'm David.",Nice to meet you!,
 `
 	type Demo struct {
-		Name  *string           `csv:"name" json:"name"`
-		Attri map[string]*int16 `csv:"attri" json:"attri"`
-		Msg   []*string         `csv:"msg" json:"msg"`
-		Num   *int16            `csv:"num" json:"num"`
+		Name  *string          `csv:"name" json:"name"`
+		Attri map[string]int16 `csv:"attri" json:"attri"`
+		Msg   []*string        `csv:"msg" json:"msg"`
+		Num   *int16           `csv:"num" json:"num"`
 	}
 	r := csv.NewReader(bytes.NewBufferString(data))
 

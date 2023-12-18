@@ -351,39 +351,38 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 					primitiveType = fieldType
 					fieldIdx      = fieldHeader.fieldIndex
 					fieldVal      = val.Elem().Field(fieldIdx)
+					isNil         bool
+					val           reflect.Value
+					err           error
 				)
-				if fieldType.Kind() == reflect.Pointer { // 处理基本类型的指针
+				// 处理基本类型的指针
+				if fieldType.Kind() == reflect.Pointer {
 					primitiveType = fieldType.Elem()
-					// 字段值为空时，保持nil
-					if (record[j] == "" && primitiveType.Kind() == reflect.String) ||
-						(strings.TrimSpace(record[j]) == "" && primitiveType.Kind() != reflect.String) {
-						continue
-					}
-					v := reflect.New(primitiveType)
-					fieldVal.Set(v)
-					fieldVal = v.Elem()
+					isNil = shallBeNil(record[j], primitiveType)
 				}
-				if fieldType.Kind() == reflect.Slice || fieldType.Kind() == reflect.Map { // 处理slice、map
+				// 处理slice和map
+				if fieldType.Kind() == reflect.Slice || fieldType.Kind() == reflect.Map {
 					primitiveType = fieldType.Elem()
 					if primitiveType.Kind() == reflect.Pointer {
 						primitiveType = primitiveType.Elem()
-						// 字段值为空时，保持nil
-						if (record[j] == "" && primitiveType.Kind() == reflect.String) ||
-							(strings.TrimSpace(record[j]) == "" && primitiveType.Kind() != reflect.String) {
-							continue
+						isNil = shallBeNil(record[j], primitiveType)
+						if isNil {
+							val = reflect.Zero(fieldType.Elem())
 						}
 					}
 				}
 
-				val, err := parsePrimitive(record[j], primitiveType)
-				if err != nil {
-					parser.err = err
-					return
+				if !isNil {
+					val, err = parsePrimitive(record[j], primitiveType)
+					if err != nil {
+						parser.err = err
+						return
+					}
 				}
 
 				switch fieldType.Kind() {
 				case reflect.Slice:
-					if fieldType.Elem().Kind() == reflect.Pointer {
+					if !isNil && fieldType.Elem().Kind() == reflect.Pointer {
 						v := reflect.New(primitiveType)
 						v.Elem().Set(val)
 						val = v
@@ -393,14 +392,21 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 					if fieldVal.IsNil() {
 						fieldVal.Set(reflect.MakeMap(fieldType))
 					}
-					if fieldType.Elem().Kind() == reflect.Pointer {
+					if !isNil && fieldType.Elem().Kind() == reflect.Pointer {
 						v := reflect.New(primitiveType)
 						v.Elem().Set(val)
 						val = v
 					}
 					fieldVal.SetMapIndex(reflect.ValueOf(fileHeader.mapKey), val)
 				default:
-					fieldVal.Set(val)
+					if !isNil {
+						if fieldType.Kind() == reflect.Pointer {
+							v := reflect.New(primitiveType)
+							v.Elem().Set(val)
+							val = v
+						}
+						fieldVal.Set(val)
+					}
 				}
 			}
 		}
@@ -419,6 +425,11 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 	}
 }
 
+func shallBeNil(txt string, typ reflect.Type) bool {
+	return (txt == "" && typ.Kind() == reflect.String) ||
+		(strings.TrimSpace(txt) == "" && typ.Kind() != reflect.String)
+}
+
 func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err error) {
 	var v any
 	fieldKind := fieldType.Kind()
@@ -427,7 +438,7 @@ func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err 
 		txt := strings.TrimSpace(txt)
 		if txt == "true" || txt == "1" {
 			v, err = true, nil
-		} else if txt != "false" && txt != "0" {
+		} else if txt != "false" && txt != "0" && txt != "" {
 			v, err = nil, fmt.Errorf("unknown bool value: %s", txt)
 		} else {
 			v, err = false, nil
@@ -450,6 +461,9 @@ func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err 
 }
 
 func parseInt(txt string, kind reflect.Kind) (int64, error) {
+	if txt == "" {
+		return 0, nil
+	}
 	var bitSize int
 	switch kind {
 	case reflect.Int:
@@ -469,6 +483,9 @@ func parseInt(txt string, kind reflect.Kind) (int64, error) {
 }
 
 func parseUint(txt string, kind reflect.Kind) (uint64, error) {
+	if txt == "" {
+		return 0, nil
+	}
 	var bitSize int
 	switch kind {
 	case reflect.Uint:
@@ -488,6 +505,9 @@ func parseUint(txt string, kind reflect.Kind) (uint64, error) {
 }
 
 func parseFloat(txt string, kind reflect.Kind) (float64, error) {
+	if txt == "" {
+		return 0, nil
+	}
 	var bitSize int
 	switch kind {
 	case reflect.Float32:
