@@ -131,8 +131,8 @@ func TestNil(t *testing.T) {
 	data := `name,{{attri:age}},{{attri:height}},[[msg]],[[msg]],num
 Alice,,180,"Hi, I'm Alice.",Nice to meet you!,
 Bob,21,175,"Hi, I'm Bob.",,2
-Candy,22,189,"Hi, I'm Candy.",Nice to meet you!,3
-,23,,"Hi, I'm David.",Nice to meet you!,
+,22,189,"Hi, I'm Candy.",Nice to meet you!,3
+ ,23,,"Hi, I'm David.",Nice to meet you!,
 `
 	type Demo struct {
 		Name  *string           `csv:"name" json:"name"`

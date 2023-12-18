@@ -73,6 +73,8 @@ type DataWrapper[T any] struct {
 // 如果csv文件中存在未在T中定义的表头字段，则在解析时忽略文件中定义的此字段信息。
 // T中支持解析的字段类型有：bool,int,int8,int16,int32,int64,uint,uint8,uint16,uint32,uint64,float32,float64,string,
 // 以及它们的指针类型，对于bool类型，合法的值为0,1,true,false，其中0，false表示false; 1，true表示true.
+// T中还支持sclie，map类型，对于slice，其元素必须是上面提到的基本类型或者基本类型的指针。
+// 对于map类型，其key必须是string类型，value必须是上面提到的基本类型或者基本类型的指针。
 func NewCsvParser[T any](reader *csv.Reader) (parser *CsvParser[T], err error) {
 	if reader == nil {
 		return nil, errors.New("csv reader is nil")
@@ -109,6 +111,7 @@ func NewCsvParser[T any](reader *csv.Reader) (parser *CsvParser[T], err error) {
 	return parser, nil
 }
 
+// 关闭parser，释放资源
 func (parser *CsvParser[T]) Close() error {
 	close(parser.closeCh)
 	return nil
@@ -181,7 +184,6 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 	return nil
 }
 
-// 支持 string, int, uint, float, bool 以及它们的指针类型
 func (parser *CsvParser[T]) isSupportedStructFieldType(typ reflect.Type) bool {
 	isPrimitiveType := func(typ reflect.Type) bool {
 		if typ.Kind() == reflect.Pointer {
