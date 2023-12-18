@@ -51,15 +51,16 @@ func (fh *fileHeader) String() string {
 }
 
 type CsvParser[T any] struct {
-	err                error
-	reader             *csv.Reader             // csv的配置由调用方确定，如分隔符、换行符
-	fileHeaders        []fileHeader            // 文件头及出现的列号
-	fieldHeaders       map[string]*fieldHeader // 结构体T所定义的表头字段
-	totalParsedRecords int                     // 记录已经解析的记录数，不包含表头行
-	dataChan           chan *DataWrapper[T]    // 将解析的行数据记录在此通道中
-	targetStructType   reflect.Type            // 想要解析为的目标结构体类型
-	doParseOnce        sync.Once               // 一个parser只允许有一个解析goroutine
-	closeCh            chan bool               // 主动关闭解析过程，防止内存泄漏
+	err                   error
+	reader                *csv.Reader             // csv的配置由调用方确定，如分隔符、换行符
+	fileHeaders           []fileHeader            // 文件头及出现的列号
+	fieldHeaders          map[string]*fieldHeader // 结构体T所定义的表头字段
+	totalParsedRecords    int                     // 记录已经解析的记录数，不包含表头行
+	dataChan              chan *DataWrapper[T]    // 将解析的行数据记录在此通道中
+	targetStructType      reflect.Type            // 想要解析为的目标结构体类型
+	doParseOnce           sync.Once               // 一个parser只允许有一个解析goroutine
+	closeCh               chan bool               // 主动关闭解析过程，防止内存泄漏
+	ignoreFieldParseError bool                    // 是否忽略某个字段值无法解析到对应类型的情况
 }
 
 // 每行解析出的记录和错误信息，如果解析出错，则err != nil
@@ -75,7 +76,7 @@ type DataWrapper[T any] struct {
 // 以及它们的指针类型，对于bool类型，合法的值为0,1,true,false，其中0，false表示false; 1，true表示true.
 // T中还支持sclie，map类型，对于slice，其元素必须是上面提到的基本类型或者基本类型的指针。
 // 对于map类型，其key必须是string类型，value必须是上面提到的基本类型或者基本类型的指针。
-func NewCsvParser[T any](reader *csv.Reader) (parser *CsvParser[T], err error) {
+func NewCsvParser[T any](reader *csv.Reader, opts ...NewParserOption[T]) (parser *CsvParser[T], err error) {
 	if reader == nil {
 		return nil, errors.New("csv reader is nil")
 	}
@@ -85,6 +86,9 @@ func NewCsvParser[T any](reader *csv.Reader) (parser *CsvParser[T], err error) {
 		dataChan:         make(chan *DataWrapper[T]),
 		targetStructType: reflect.TypeOf(new(T)).Elem(),
 		closeCh:          make(chan bool),
+	}
+	for i := range opts {
+		opts[i](parser)
 	}
 
 	err = parser.getStructHeaders()
@@ -109,6 +113,15 @@ func NewCsvParser[T any](reader *csv.Reader) (parser *CsvParser[T], err error) {
 	}
 
 	return parser, nil
+}
+
+type NewParserOption[T any] func(*CsvParser[T])
+
+// 是否忽略某个字段值无法解析到对应类型的情况
+func WithIgnoreFieldParseError[T any](b bool) NewParserOption[T] {
+	return func(cp *CsvParser[T]) {
+		cp.ignoreFieldParseError = b
+	}
 }
 
 // 关闭parser，释放资源
@@ -375,8 +388,12 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 				if !isNil {
 					val, err = parsePrimitive(record[j], primitiveType)
 					if err != nil {
-						parser.err = err
-						return
+						if parser.ignoreFieldParseError {
+							continue
+						} else {
+							parser.err = err
+							return
+						}
 					}
 				}
 

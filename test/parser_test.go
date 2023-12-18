@@ -6,7 +6,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,10 +45,10 @@ type Demo struct {
 }
 
 func TestAllPrimitiveType(t *testing.T) {
+	data := `bool,boolPtr,int,intPtr,int8,int8Ptr,int16,int16Ptr,int32,int32Ptr,int64,int64Ptr,uint,uintPtr,uint8,uint8Ptr,uint16,uint16Ptr,uint32,uint32Ptr,uint64,uint64Ptr,float32,float32Ptr,float64,float64Ptr,string,stringPtr
+1,true,1234,1234,127,127,1234,1234,1234,1234,1234,1234,12345,12345,255,255,65535,65535,12345,12345,12345,12345,123.45,123.45,123.45,123.456,hello world,world hello`
 	var err error
-	f, err := os.Open("./type_data.csv")
-	assert.Empty(t, err)
-	r := csv.NewReader(f)
+	r := csv.NewReader(bytes.NewBufferString(data))
 
 	parser, err := csv_parser.NewCsvParser[Demo](r)
 	assert.Empty(t, err)
@@ -68,7 +67,7 @@ func TestAllPrimitiveType(t *testing.T) {
 
 func TestSlice(t *testing.T) {
 	data := `[[nums]],[[nums]],[[nums]]
-1,2,3
+1,2,
 4,5,6
 7,8,9
 10,11,12
@@ -143,6 +142,36 @@ Bob,21,175,"Hi, I'm Bob.",,2
 	r := csv.NewReader(bytes.NewBufferString(data))
 
 	parser, err := csv_parser.NewCsvParser[Demo](r)
+	assert.Empty(t, err)
+	defer parser.Close()
+
+	fmt.Printf("parser.FieldHeaders(): %v\n", parser.FieldHeaders())
+
+	fmt.Printf("parser.FileHeaders(): %v\n", parser.FileHeaders())
+
+	for dataWrapper := range parser.DataChan(context.Background()) {
+		assert.Empty(t, dataWrapper.Err)
+		b, err := json.Marshal(dataWrapper.Data)
+		assert.Empty(t, err)
+
+		fmt.Printf("demo: %s\n", string(b))
+	}
+
+	fmt.Printf("done\n")
+}
+
+func TestIgnoreFieldError(t *testing.T) {
+	data := `name,age
+Alice,20
+Bob,hello
+`
+	type Demo struct {
+		Name string `csv:"name" json:"name"`
+		Age  int    `csv:"age" json:"age"`
+	}
+	r := csv.NewReader(bytes.NewBufferString(data))
+
+	parser, err := csv_parser.NewCsvParser[Demo](r, csv_parser.WithIgnoreFieldParseError[Demo](true))
 	assert.Empty(t, err)
 	defer parser.Close()
 
