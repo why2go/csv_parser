@@ -64,8 +64,9 @@ type CsvParser[T any] struct {
 	targetStructType      reflect.Type
 	doParseOnce           sync.Once
 	closeCh               chan bool // to avoid goroutine leaking
-	ignoreFieldParseError bool      // if set true, the parsing process will continue when some field can't be parsed
-	lineCursor            int       // point to the next line to be parsed, starting from one
+	closeOnce             sync.Once
+	ignoreFieldParseError bool // if set true, the parsing process will continue when some field can't be parsed
+	lineCursor            int  // point to the next line to be parsed, starting from one
 }
 
 // the data structure in the data channel.
@@ -133,9 +134,10 @@ func WithIgnoreFieldParseError[T any](b bool) NewParserOption[T] {
 
 // stop the parsing process and close the data channel.
 // you should call this method when task finished or aborted.
-func (parser *CsvParser[T]) Close() error {
-	close(parser.closeCh)
-	return nil
+func (parser *CsvParser[T]) Close() {
+	parser.closeOnce.Do(func() {
+		close(parser.closeCh)
+	})
 }
 
 // if parsing failed, return the parsing error
@@ -288,7 +290,7 @@ func (parser *CsvParser[T]) validateHeaders() error {
 		for k := range requiredSet {
 			keys = append(keys, k)
 		}
-		return fmt.Errorf("some required headers not foun in csv file header: %v", strings.Join(keys, ","))
+		return fmt.Errorf("some required headers not found in csv file header: %v", strings.Join(keys, ","))
 	}
 
 	// check slice and map fields
@@ -344,12 +346,12 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 
 	for {
 		record, err := parser.reader.Read()
-		parser.lineCursor++
-
 		if err == io.EOF { // all records were parsed
 			close(parser.dataChan)
 			return
 		}
+
+		parser.lineCursor++
 		if err != nil {
 			parser.err = err
 			return
