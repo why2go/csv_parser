@@ -164,6 +164,7 @@ func TestIgnoreFieldError(t *testing.T) {
 	data := `name,age
 Alice,20
 Bob,hello
+
 `
 	type Demo struct {
 		Name string `csv:"name" json:"name"`
@@ -186,6 +187,8 @@ Bob,hello
 
 		fmt.Printf("demo: %s\n", string(b))
 	}
+
+	fmt.Printf("parser.GetLineCursor(): %v\n", parser.GetLineCursor())
 
 	fmt.Printf("done\n")
 }

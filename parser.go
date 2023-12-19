@@ -288,7 +288,7 @@ func (parser *CsvParser[T]) validateHeaders() error {
 		for k := range requiredSet {
 			keys = append(keys, k)
 		}
-		return fmt.Errorf("some required headers not foun in csv file header: %v", strings.Join(keys, ","))
+		return fmt.Errorf("some required headers not found in csv file header: %v", strings.Join(keys, ","))
 	}
 
 	// check slice and map fields
@@ -344,12 +344,11 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 
 	for {
 		record, err := parser.reader.Read()
-		parser.lineCursor++
-
 		if err == io.EOF { // all records were parsed
 			close(parser.dataChan)
 			return
 		}
+		parser.lineCursor++
 		if err != nil {
 			parser.err = err
 			return
@@ -450,8 +449,11 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 }
 
 func shallBeNil(txt string, typ reflect.Type) bool {
-	return (txt == "" && typ.Kind() == reflect.String) ||
-		(strings.TrimSpace(txt) == "" && typ.Kind() != reflect.String)
+	if typ.Kind() == reflect.String {
+		return txt == ""
+	} else {
+		return strings.TrimSpace(txt) == ""
+	}
 }
 
 func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err error) {
