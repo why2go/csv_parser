@@ -1,3 +1,7 @@
+// Copyright 2023 Sun Zhi. All rights reserved.
+// Use of this source code is governed by a MIT style
+// license that can be found in the LICENSE file.
+
 package csv_parser
 
 import (
@@ -14,36 +18,37 @@ import (
 )
 
 const (
-	FieldTagKey          = "csv"
-	FieldTagOpt_Omit     = "-"        // 如果tag名为此字符，则此字段不参与解析
-	FieldTagOpt_Required = "required" // 如果tag选项中有此字段，则对应csv文件表头必须有此字段，否则报错
+	FieldTagKey          = "csv"      // the key to identify the csv tag
+	FieldTagOpt_Omit     = "-"        // if the field tag is "-", the field is always omitted
+	FieldTagOpt_Required = "required" // if the tag present, the field must be presented in the csv file header
 )
 
 var (
-	sliceRegex = regexp.MustCompile(`^\[\[[\w:-]+\]\]$`)    // csv文件中，如果表头字段类型为slice，其表头名应该满足的格式，如[[nums]]
-	mapRegex   = regexp.MustCompile(`^{{[\w-]+:[\w-:]+}}$`) // csv文件中，如果表头字段类型为map，其表头名应该满足的格式，如{{map1:key1}}
+	// if a struct field type is slice, corresponding csv file header must match this pattern, for example: [[nums]]
+	sliceRegex = regexp.MustCompile(`^\[\[[\w:-]+\]\]$`)
+	// if a struct field type is map, corresponding csv file header must match this pattern, for example: {{map1:key1}}
+	mapRegex = regexp.MustCompile(`^{{[\w-]+:[\w-:]+}}$`)
 )
 
-// 记录目标结构体中定义的header信息
 type fieldHeader struct {
-	name       string       // 表头字段名
-	fieldIndex int          // 字段下标
-	fieldType  reflect.Type // 字段反射类型
-	required   bool         // 是否必填字段
+	name       string       // corresponding csv file header name
+	fieldIndex int          // the index of the field in the struct
+	fieldType  reflect.Type // the type of the field
+	required   bool         // has "required" option or not
 }
 
 func (fh *fieldHeader) String() string {
 	return fmt.Sprintf("{name: %s, fieldIndex: %d, fieldType: %v, required: %v}", fh.name, fh.fieldIndex, fh.fieldType, fh.required)
 }
 
-// 记录csv文件的header信息
+// the csv file header
 type fileHeader struct {
-	name       string // 一般对应到struct结构体中的tag名，map类型表示mapName:keyName
-	fullName   string // 原始的表头名，对于slice和map，相较于name，该字段会有前缀和后缀字符
-	matchSlice bool   // 表头形式是否匹配到slice表头格式
-	matchMap   bool   // 表头形式是否匹配到map表头格式
-	mapName    string // 如果是map形式，该字段表示对应到结构体中的tag名
-	mapKey     string // 如果是map形式，该字段表示map中的key
+	fullName   string // original csv header name
+	name       string // csv header name without prefix and suffix
+	matchSlice bool   // match slice pattern or not
+	matchMap   bool   // match map pattern or not
+	mapName    string // if the header match map pattern, this field records the map field tag name
+	mapKey     string // if the header match map pattern, this field records the key of the map element
 }
 
 func (fh *fileHeader) String() string {
@@ -52,30 +57,32 @@ func (fh *fileHeader) String() string {
 
 type CsvParser[T any] struct {
 	err                   error
-	reader                *csv.Reader             // csv的配置由调用方确定，如分隔符、换行符
-	fileHeaders           []fileHeader            // 文件头及出现的列号
-	fieldHeaders          map[string]*fieldHeader // 结构体T所定义的表头字段
-	totalParsedRecords    int                     // 记录已经解析的记录数，不包含表头行
-	dataChan              chan *DataWrapper[T]    // 将解析的行数据记录在此通道中
-	targetStructType      reflect.Type            // 想要解析为的目标结构体类型
-	doParseOnce           sync.Once               // 一个parser只允许有一个解析goroutine
-	closeCh               chan bool               // 主动关闭解析过程，防止内存泄漏
-	ignoreFieldParseError bool                    // 是否忽略某个字段值无法解析到对应类型的情况
+	reader                *csv.Reader
+	fileHeaders           []fileHeader
+	fieldHeaders          map[string]*fieldHeader
+	dataChan              chan *DataWrapper[T]
+	targetStructType      reflect.Type
+	doParseOnce           sync.Once
+	closeCh               chan bool // to avoid goroutine leaking
+	ignoreFieldParseError bool      // if set true, the parsing process will continue when some field can't be parsed
+	lineCursor            int       // point to the next line to be parsed, starting from one
 }
 
-// 每行解析出的记录和错误信息，如果解析出错，则err != nil
+// the data structure in the data channel.
+//
+// if error occurs, the Err field is not nil, and parsing process will be stopped
 type DataWrapper[T any] struct {
 	Data *T
 	Err  error
 }
 
-// 创建一个CsvParser，而后应当从DataChan方法中获取逐行解析的记录，类型T必须是一个struct类型，不允许是指向struct的指针。
-// reader指向一个带有表头的csv文件，表头字段应当与T定义的表头在名称上对应，但是二者不必保持顺序上的对应。
-// 如果csv文件中存在未在T中定义的表头字段，则在解析时忽略文件中定义的此字段信息。
-// T中支持解析的字段类型有：bool,int,int8,int16,int32,int64,uint,uint8,uint16,uint32,uint64,float32,float64,string,
-// 以及它们的指针类型，对于bool类型，合法的值为0,1,true,false，其中0，false表示false; 1，true表示true.
-// T中还支持sclie，map类型，对于slice，其元素必须是上面提到的基本类型或者基本类型的指针。
-// 对于map类型，其key必须是string类型，value必须是上面提到的基本类型或者基本类型的指针。
+// Create a CsvParser instance, type T must be struct, can't be a pointer to struct.
+// The reader is an instance of encoding/csv.Reader from go standard library.
+// Type of T's fields supports the following types:
+// 1. primitive types: bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string.
+// 2. pointer of primitive types.
+// 3. slice: whose element's type is primitive type or pointer of primitive type.
+// 4. map: whose key's type is string and value's type is primitive type or pointer of primitive type.
 func NewCsvParser[T any](reader *csv.Reader, opts ...NewParserOption[T]) (parser *CsvParser[T], err error) {
 	if reader == nil {
 		return nil, errors.New("csv reader is nil")
@@ -86,6 +93,7 @@ func NewCsvParser[T any](reader *csv.Reader, opts ...NewParserOption[T]) (parser
 		dataChan:         make(chan *DataWrapper[T]),
 		targetStructType: reflect.TypeOf(new(T)).Elem(),
 		closeCh:          make(chan bool),
+		lineCursor:       1,
 	}
 	for i := range opts {
 		opts[i](parser)
@@ -117,20 +125,24 @@ func NewCsvParser[T any](reader *csv.Reader, opts ...NewParserOption[T]) (parser
 
 type NewParserOption[T any] func(*CsvParser[T])
 
-// 是否忽略某个字段值无法解析到对应类型的情况
 func WithIgnoreFieldParseError[T any](b bool) NewParserOption[T] {
 	return func(cp *CsvParser[T]) {
 		cp.ignoreFieldParseError = b
 	}
 }
 
-// 关闭parser，释放资源
+// stop the parsing process and close the data channel.
+// you should call this method when task finished or aborted.
 func (parser *CsvParser[T]) Close() error {
 	close(parser.closeCh)
 	return nil
 }
 
-// 返回所有从目标结构体中得到的文件头字段，此函数通常用于排查问题
+// if parsing failed, return the parsing error
+func (parser *CsvParser[T]) Error() error {
+	return parser.err
+}
+
 func (parser *CsvParser[T]) FieldHeaders() []string {
 	var hds []string
 	for _, v := range parser.fieldHeaders {
@@ -139,7 +151,6 @@ func (parser *CsvParser[T]) FieldHeaders() []string {
 	return hds
 }
 
-// 返回从csv文件中解析到的文件头字段，此函数通常用于排查问题
 func (parser *CsvParser[T]) FileHeaders() []string {
 	var hds []string
 	for _, v := range parser.fileHeaders {
@@ -148,8 +159,6 @@ func (parser *CsvParser[T]) FileHeaders() []string {
 	return hds
 }
 
-// 通过反射，从结构体中得到定义的文件头
-// 如果没有使用csv tag定义表头名，则默认将字段名首字母小写作为表头名
 func (parser *CsvParser[T]) getStructHeaders() (err error) {
 	t := parser.targetStructType
 	if t.Kind() != reflect.Struct {
@@ -157,7 +166,7 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 		return err
 	}
 
-	headerNameSet := make(map[string]struct{}) // 用作校验是否存在相同的header名字
+	headerNameSet := make(map[string]struct{}) // used to check duplicate field tags
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
 		if !sf.IsExported() {
@@ -169,7 +178,8 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 			header.fieldType = sf.Type
 			if tag, ok := sf.Tag.Lookup(FieldTagKey); ok {
 				name, opts, _ := strings.Cut(tag, ",")
-				if name == FieldTagOpt_Omit { // 忽略此字段
+				name = strings.TrimSpace(name)
+				if name == FieldTagOpt_Omit { // ignore this field
 					continue
 				}
 				if _, ok := headerNameSet[name]; ok {
@@ -180,13 +190,9 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 				header.name = name
 				header.required = strings.Contains(opts, FieldTagOpt_Required)
 			}
-			// 默认表头名为字段名首字母小写
-			if header.name == "" {
+			// default header name is the field name
+			if len(header.name) == 0 {
 				header.name = sf.Name
-				b := []byte(header.name)
-				if 'A' <= b[0] && b[0] <= 'Z' { // 将首字母小写
-					b[0] = (b[0] + 'a' - 'A')
-				}
 			}
 			parser.fieldHeaders[header.name] = header
 		}
@@ -224,20 +230,20 @@ func (parser *CsvParser[T]) isSupportedStructFieldType(typ reflect.Type) bool {
 
 }
 
-// 读取csv文件中的header，表头字段不允许有重复
 func (parser *CsvParser[T]) getFileHeaders() error {
 	var err error
-	record, err := parser.reader.Read() // 第一行是headers
+	record, err := parser.reader.Read()
+	parser.lineCursor++
 	if err != nil {
 		return err
 	}
 	for i := range record {
 		fullName := strings.TrimSpace(record[i])
 		fh := fileHeader{fullName: fullName}
-		if sliceRegex.MatchString(fullName) { // 匹配到slice
+		if sliceRegex.MatchString(fullName) { // match slice pattern
 			fh.name = fullName[2 : len(fullName)-2]
 			fh.matchSlice = true
-		} else if mapRegex.MatchString(fullName) { // 匹配到map
+		} else if mapRegex.MatchString(fullName) { // match map pattern
 			fh.name = fullName[2 : len(fullName)-2]
 			fh.matchMap = true
 			var found bool
@@ -250,10 +256,10 @@ func (parser *CsvParser[T]) getFileHeaders() error {
 		}
 		parser.fileHeaders = append(parser.fileHeaders, fh)
 	}
-	// 校验文件中解析的头部是否重复
+	// check duplicate headers, headers matching slice pattern will be ignored
 	fileHeaderSet := make(map[string]struct{})
 	for i := range parser.fileHeaders {
-		if parser.fileHeaders[i].matchSlice { // slice无需检查重复
+		if parser.fileHeaders[i].matchSlice {
 			continue
 		}
 		if _, ok := fileHeaderSet[parser.fileHeaders[i].name]; ok {
@@ -273,7 +279,7 @@ func (parser *CsvParser[T]) validateHeaders() error {
 		}
 	}
 
-	// 匹配required选项
+	// check required option
 	for i := range parser.fileHeaders {
 		delete(requiredSet, parser.fileHeaders[i].name)
 	}
@@ -285,7 +291,7 @@ func (parser *CsvParser[T]) validateHeaders() error {
 		return fmt.Errorf("some required headers not foun in csv file header: %v", strings.Join(keys, ","))
 	}
 
-	// 校验slice字段和map字段
+	// check slice and map fields
 	for i := range parser.fileHeaders {
 		if parser.fileHeaders[i].matchSlice {
 			if hd, ok := parser.fieldHeaders[parser.fileHeaders[i].name]; ok {
@@ -306,12 +312,12 @@ func (parser *CsvParser[T]) validateHeaders() error {
 	return nil
 }
 
-func (parser *CsvParser[T]) GetTotalParsedRecords() int {
-	return parser.totalParsedRecords
+func (parser *CsvParser[T]) GetLineCursor() int {
+	return parser.lineCursor
 }
 
-// 从channel中不断获取解析的每行数据，可以用于多线程中
-// 如果解析遇到错误，则返回的DataWrapper的Err不为nil，此后解析终止，channel关闭
+// Return the parsed data channel.
+// If some error occurs, dataWrapper.Err will not be nil, and the channel will be closed forever.
 func (parser *CsvParser[T]) DataChan(ctx context.Context) <-chan *DataWrapper[T] {
 	parser.doParseOnce.Do(func() {
 		go func() {
@@ -327,7 +333,7 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 		return
 	}
 
-	// 解析出错则发送一个错误，关闭channel
+	// if parser.err was set, stop parsing process and close the channel
 	defer func() {
 		if parser.err != nil {
 			parser.dataChan <- &DataWrapper[T]{Err: parser.err}
@@ -338,7 +344,9 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 
 	for {
 		record, err := parser.reader.Read()
-		if err == io.EOF { // 成功解析完，则关闭通道
+		parser.lineCursor++
+
+		if err == io.EOF { // all records were parsed
 			close(parser.dataChan)
 			return
 		}
@@ -346,6 +354,7 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 			parser.err = err
 			return
 		}
+
 		val := reflect.New(parser.targetStructType)
 
 		for j := range record {
@@ -357,7 +366,7 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 				name = fileHeader.name
 			}
 			if fieldHeader, ok := parser.fieldHeaders[name]; !ok {
-				continue // 文件中的多余字段被忽略
+				continue // ignore uninteresting field
 			} else {
 				var (
 					fieldType     = fieldHeader.fieldType
@@ -368,12 +377,12 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 					val           reflect.Value
 					err           error
 				)
-				// 处理基本类型的指针
+				// pointer fields
 				if fieldType.Kind() == reflect.Pointer {
 					primitiveType = fieldType.Elem()
 					isNil = shallBeNil(record[j], primitiveType)
 				}
-				// 处理slice和map
+				// slice or map
 				if fieldType.Kind() == reflect.Slice || fieldType.Kind() == reflect.Map {
 					primitiveType = fieldType.Elem()
 					if primitiveType.Kind() == reflect.Pointer {
@@ -427,8 +436,6 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 				}
 			}
 		}
-
-		parser.totalParsedRecords++
 
 		select {
 		case <-ctx.Done():
