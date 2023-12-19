@@ -69,9 +69,8 @@ type CsvParser[T any] struct {
 	lineCursor            int  // point to the next line to be parsed, starting from one
 }
 
-// the data structure in the data channel.
-//
-// if error occurs, the Err field is not nil, and parsing process will be stopped
+// DataWrapper is the type of channel data, it wraps parsed record and an error.
+// If error occurs, the Err field is not nil, and parsing process will be stopped.
 type DataWrapper[T any] struct {
 	Data *T
 	Err  error
