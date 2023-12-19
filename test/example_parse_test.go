@@ -1,30 +1,4 @@
-# csv_parser
-Csv parser can read from csv file and then parse record to golang structs.
-
-
-
-## Getting start
-
-### Installation
-
-```
-go get github.com/why2go/csv_parser
-```
-
-### Supported field types
-
-1. primitive types: bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string.
-
-2. pointer of primitive types.
-
-3. slice: whose element's type is primitive type or pointer of primitive type.
-
-4. map: whose key's type is string and value's type is primitive type or pointer of primitive type.
-
-### Example
-
-```go
-package main
+package test
 
 import (
 	"bytes"
@@ -36,7 +10,7 @@ import (
 	"github.com/why2go/csv_parser"
 )
 
-func main() {
+func Example_parse() {
 	data := `name,{{attri:age}},{{attri:height}},[[msg]],[[msg]]
 Alice,20,,"Hi, I'm Alice.",Nice to meet you!
 Bob,21,175,"Hi, I'm Bob.",Nice to meet you!
@@ -50,13 +24,12 @@ David,23,172,"Hi, I'm David.",Nice to meet you!
 	}
 
 	r := csv.NewReader(bytes.NewBufferString(data))
-	parser, err := csv_parser.NewCsvParser[Demo](r)  // create a csv parser
+	parser, err := csv_parser.NewCsvParser[Demo](r)
 	if err != nil {
 		panic(err)
 	}
-	defer parser.Close()	// close the parser
+	defer parser.Close()
 
-  // get parsed data from channel
 	for dataWrapper := range parser.DataChan(context.Background()) {
 		if err != nil {
 			panic(err)
@@ -65,14 +38,9 @@ David,23,172,"Hi, I'm David.",Nice to meet you!
 		if err != nil {
 			panic(err)
 		}
+
 		fmt.Printf("demo: %s\n", string(b))
 	}
 
 	fmt.Printf("done\n")
 }
-```
-
-
-
-
-
