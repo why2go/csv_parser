@@ -18,9 +18,9 @@ Candy,,189,"Hi, I'm Candy.",Nice to meet you!
 David,23,172,"Hi, I'm David.",Nice to meet you!
 `
 	type Demo struct {
-		Name  string            `csv:"name,required" json:"name"`
-		Attri map[string]*int16 `csv:"attri" json:"attri"`
-		Msg   []string          `csv:"msg" json:"msg"`
+		Name  string           `csv:"name,required" json:"name"`
+		Attri map[string]int16 `csv:"attri" json:"attri"`
+		Msg   []string         `csv:"msg" json:"msg"`
 	}
 
 	r := csv.NewReader(bytes.NewBufferString(data))

@@ -21,6 +21,7 @@ const (
 	FieldTagKey          = "csv"      // the key to identify the csv tag
 	FieldTagOpt_Omit     = "-"        // if the field tag is "-", the field is always omitted
 	FieldTagOpt_Required = "required" // if the tag present, the field must be presented in the csv file header
+	FieldTagOpt_Default  = "default"  // default value for the field
 )
 
 var (
@@ -31,14 +32,25 @@ var (
 )
 
 type fieldHeader struct {
-	name       string       // corresponding csv file header name
-	fieldIndex int          // the index of the field in the struct
-	fieldType  reflect.Type // the type of the field
-	required   bool         // has "required" option or not
+	name       string         // corresponding csv file header name
+	fieldIndex int            // the index of the field in the struct
+	fieldType  reflect.Type   // the type of the field
+	required   bool           // has "required" option or not
+	defaultVal *reflect.Value // default value for the field, nil if don't have a default value
 }
 
 func (fh *fieldHeader) String() string {
-	return fmt.Sprintf("{name: %s, fieldIndex: %d, fieldType: %v, required: %v}", fh.name, fh.fieldIndex, fh.fieldType, fh.required)
+	var defaultValStr string
+	if fh.defaultVal == nil {
+		defaultValStr = "nil"
+	} else {
+		defaultValStr = fmt.Sprintf("%v", *fh.defaultVal)
+	}
+	return fmt.Sprintf("{name: %s, fieldIndex: %d, fieldType: %v, required: %v, defaultVal: %#v}", fh.name, fh.fieldIndex, fh.fieldType, fh.required, defaultValStr)
+}
+
+func (fh *fieldHeader) hasDefaultVal() bool {
+	return fh.defaultVal != nil
 }
 
 // the csv file header
@@ -66,7 +78,7 @@ type CsvParser[T any] struct {
 	closeCh               chan bool // to avoid goroutine leaking
 	closeOnce             sync.Once
 	ignoreFieldParseError bool // if set true, the parsing process will continue when some field can't be parsed
-	lineCursor            int  // point to the next line to be parsed, starting from one
+	lineCursor            int  // point to the next line to be parsed, index starting from one
 }
 
 // DataWrapper is the type of channel data, it wraps parsed record and an error.
@@ -78,11 +90,15 @@ type DataWrapper[T any] struct {
 
 // Create a CsvParser instance, type T must be struct, can't be a pointer to struct.
 // The reader is an instance of encoding/csv.Reader from go standard library.
-// Type of T's fields supports the following types:
-// 1. primitive types: bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string.
-// 2. pointer of primitive types.
-// 3. slice: whose element's type is primitive type or pointer of primitive type.
-// 4. map: whose key's type is string and value's type is primitive type or pointer of primitive type.
+// The type of T's fields is constrained to the following kind:
+//
+//  1. primitive types: bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string.
+//
+//  2. slice: whose element's type is primitive type.
+//
+//  3. map: whose key's type is string and value's type is primitive type.
+//
+// Struct fields don't match the type requirements will be ignored.
 func NewCsvParser[T any](reader *csv.Reader, opts ...NewParserOption[T]) (parser *CsvParser[T], err error) {
 	if reader == nil {
 		return nil, errors.New("csv reader is nil")
@@ -93,7 +109,7 @@ func NewCsvParser[T any](reader *csv.Reader, opts ...NewParserOption[T]) (parser
 		dataChan:         make(chan *DataWrapper[T]),
 		targetStructType: reflect.TypeOf(new(T)).Elem(),
 		closeCh:          make(chan bool),
-		lineCursor:       1,
+		lineCursor:       1, // the line number staring from one
 	}
 	for i := range opts {
 		opts[i](parser)
@@ -125,21 +141,25 @@ func NewCsvParser[T any](reader *csv.Reader, opts ...NewParserOption[T]) (parser
 
 type NewParserOption[T any] func(*CsvParser[T])
 
+// If set to ignore the parse error, whenever we can't transform the value text to specifed struct type,
+// the parser will continue parsing the next struct field.
+//
+// The default value is false.
 func WithIgnoreFieldParseError[T any](b bool) NewParserOption[T] {
 	return func(cp *CsvParser[T]) {
 		cp.ignoreFieldParseError = b
 	}
 }
 
-// stop the parsing process and close the data channel.
-// you should call this method when task finished or aborted.
+// Stop the parsing process and close the data channel.
+// You should call this method when task finished or aborted.
 func (parser *CsvParser[T]) Close() {
 	parser.closeOnce.Do(func() {
 		close(parser.closeCh)
 	})
 }
 
-// if parsing failed, return the parsing error
+// If parsing failed, return the parsing error
 func (parser *CsvParser[T]) Error() error {
 	return parser.err
 }
@@ -170,7 +190,7 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 	headerNameSet := make(map[string]struct{}) // used to check duplicate field tags
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
-		if !sf.IsExported() {
+		if !sf.IsExported() { // ignore unexported fields
 			continue
 		}
 		if parser.isSupportedStructFieldType(sf.Type) {
@@ -189,7 +209,31 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 					headerNameSet[name] = struct{}{}
 				}
 				header.name = name
-				header.required = strings.Contains(opts, FieldTagOpt_Required)
+				optKVs := make(map[string]string)
+				kvs := strings.Split(opts, ",")
+				if len(kvs) == 0 {
+					continue
+				}
+				for _, v := range kvs {
+					optKey, optVal, _ := strings.Cut(strings.TrimSpace(v), "=")
+					optKVs[optKey] = strings.TrimSpace(optVal)
+				}
+				// handle "required" option
+				if _, ok := optKVs[FieldTagOpt_Required]; ok {
+					header.required = strings.Contains(opts, FieldTagOpt_Required)
+				}
+				// handle "default" option, ignore if fieldType is not primitive type
+				if val, ok := optKVs[FieldTagOpt_Default]; ok {
+					typ := sf.Type
+					if !parser.isPrimitiveType(typ) {
+						return fmt.Errorf("only primitive type can have default value")
+					}
+					v, err := parsePrimitive(val, typ)
+					if err != nil && !errors.Is(err, errEmptyValue) {
+						return fmt.Errorf("bad default value: %s, err: %v", val, err)
+					}
+					header.defaultVal = &v
+				}
 			}
 			// default header name is the field name
 			if len(header.name) == 0 {
@@ -204,30 +248,27 @@ func (parser *CsvParser[T]) getStructHeaders() (err error) {
 	return nil
 }
 
-func (parser *CsvParser[T]) isSupportedStructFieldType(typ reflect.Type) bool {
-	isPrimitiveType := func(typ reflect.Type) bool {
-		if typ.Kind() == reflect.Pointer {
-			typ = typ.Elem()
-		}
-		return typ.Kind() == reflect.String ||
-			typ.Kind() == reflect.Int ||
-			typ.Kind() == reflect.Int8 ||
-			typ.Kind() == reflect.Int16 ||
-			typ.Kind() == reflect.Int32 ||
-			typ.Kind() == reflect.Int64 ||
-			typ.Kind() == reflect.Uint ||
-			typ.Kind() == reflect.Uint8 ||
-			typ.Kind() == reflect.Uint16 ||
-			typ.Kind() == reflect.Uint32 ||
-			typ.Kind() == reflect.Uint64 ||
-			typ.Kind() == reflect.Float32 ||
-			typ.Kind() == reflect.Float64 ||
-			typ.Kind() == reflect.Bool
-	}
+func (parser *CsvParser[T]) isPrimitiveType(typ reflect.Type) bool {
+	return typ.Kind() == reflect.String ||
+		typ.Kind() == reflect.Int ||
+		typ.Kind() == reflect.Int8 ||
+		typ.Kind() == reflect.Int16 ||
+		typ.Kind() == reflect.Int32 ||
+		typ.Kind() == reflect.Int64 ||
+		typ.Kind() == reflect.Uint ||
+		typ.Kind() == reflect.Uint8 ||
+		typ.Kind() == reflect.Uint16 ||
+		typ.Kind() == reflect.Uint32 ||
+		typ.Kind() == reflect.Uint64 ||
+		typ.Kind() == reflect.Float32 ||
+		typ.Kind() == reflect.Float64 ||
+		typ.Kind() == reflect.Bool
+}
 
-	return isPrimitiveType(typ) ||
-		(typ.Kind() == reflect.Slice && isPrimitiveType(typ.Elem())) ||
-		(typ.Kind() == reflect.Map && typ.Key().Kind() == reflect.String && isPrimitiveType(typ.Elem()))
+func (parser *CsvParser[T]) isSupportedStructFieldType(typ reflect.Type) bool {
+	return parser.isPrimitiveType(typ) ||
+		(typ.Kind() == reflect.Slice && parser.isPrimitiveType(typ.Elem())) ||
+		(typ.Kind() == reflect.Map && typ.Key().Kind() == reflect.String && parser.isPrimitiveType(typ.Elem()))
 
 }
 
@@ -313,6 +354,7 @@ func (parser *CsvParser[T]) validateHeaders() error {
 	return nil
 }
 
+// The next line number to be read, index starting from one, including the headers line.
 func (parser *CsvParser[T]) GetLineCursor() int {
 	return parser.lineCursor
 }
@@ -366,75 +408,56 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 			} else {
 				name = fileHeader.name
 			}
-			if fieldHeader, ok := parser.fieldHeaders[name]; !ok {
+			var (
+				fieldHeader *fieldHeader
+				ok          bool
+			)
+			if fieldHeader, ok = parser.fieldHeaders[name]; !ok {
 				continue // ignore uninteresting field
-			} else {
-				var (
-					fieldType     = fieldHeader.fieldType
-					primitiveType = fieldType
-					fieldIdx      = fieldHeader.fieldIndex
-					fieldVal      = val.Elem().Field(fieldIdx)
-					isNil         bool
-					val           reflect.Value
-					err           error
-				)
-				// pointer fields
-				if fieldType.Kind() == reflect.Pointer {
-					primitiveType = fieldType.Elem()
-					isNil = shallBeNil(record[j], primitiveType)
-				}
-				// slice or map
-				if fieldType.Kind() == reflect.Slice || fieldType.Kind() == reflect.Map {
-					primitiveType = fieldType.Elem()
-					if primitiveType.Kind() == reflect.Pointer {
-						primitiveType = primitiveType.Elem()
-						isNil = shallBeNil(record[j], primitiveType)
-						if isNil {
-							val = reflect.Zero(fieldType.Elem())
-						}
-					}
-				}
+			}
+			var (
+				fieldType     = fieldHeader.fieldType
+				primitiveType = fieldType
+				fieldIdx      = fieldHeader.fieldIndex
+				fieldVal      = val.Elem().Field(fieldIdx)
+				val           reflect.Value
+				err           error
+			)
+			// slice or map
+			if fieldType.Kind() == reflect.Slice || fieldType.Kind() == reflect.Map {
+				primitiveType = fieldType.Elem()
+			}
 
-				if !isNil {
-					val, err = parsePrimitive(record[j], primitiveType)
-					if err != nil {
-						if parser.ignoreFieldParseError {
-							continue
+			val, err = parsePrimitive(record[j], primitiveType)
+			if err != nil {
+				if errors.Is(err, errEmptyValue) {
+					if fieldHeader.hasDefaultVal() {
+						val = *fieldHeader.defaultVal
+					}
+				} else {
+					if parser.ignoreFieldParseError {
+						if fieldHeader.hasDefaultVal() {
+							val = *fieldHeader.defaultVal
 						} else {
-							parser.err = err
-							return
+							continue
 						}
+					} else {
+						parser.err = err
+						return
 					}
 				}
+			}
 
-				switch fieldType.Kind() {
-				case reflect.Slice:
-					if !isNil && fieldType.Elem().Kind() == reflect.Pointer {
-						v := reflect.New(primitiveType)
-						v.Elem().Set(val)
-						val = v
-					}
-					fieldVal.Set(reflect.Append(fieldVal, val))
-				case reflect.Map:
-					if fieldVal.IsNil() {
-						fieldVal.Set(reflect.MakeMap(fieldType))
-					}
-					if !isNil && fieldType.Elem().Kind() == reflect.Pointer {
-						v := reflect.New(primitiveType)
-						v.Elem().Set(val)
-						val = v
-					}
-					fieldVal.SetMapIndex(reflect.ValueOf(fileHeader.mapKey), val)
-				default:
-					if !isNil {
-						if fieldType.Kind() == reflect.Pointer {
-							v := reflect.New(primitiveType)
-							v.Elem().Set(val)
-							val = v
-						}
-						fieldVal.Set(val)
-					}
+			switch fieldType.Kind() {
+			case reflect.Slice:
+				fieldVal.Set(reflect.Append(fieldVal, val))
+			case reflect.Map:
+				if fieldVal.IsNil() {
+					fieldVal.Set(reflect.MakeMap(fieldType))
 				}
+				fieldVal.SetMapIndex(reflect.ValueOf(fileHeader.mapKey), val)
+			default:
+				fieldVal.Set(val)
 			}
 		}
 
@@ -450,10 +473,9 @@ func (parser *CsvParser[T]) doParse(ctx context.Context) {
 	}
 }
 
-func shallBeNil(txt string, typ reflect.Type) bool {
-	return (txt == "" && typ.Kind() == reflect.String) ||
-		(strings.TrimSpace(txt) == "" && typ.Kind() != reflect.String)
-}
+var (
+	errEmptyValue = errors.New("empty value")
+)
 
 func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err error) {
 	var v any
@@ -461,12 +483,15 @@ func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err 
 	switch fieldKind {
 	case reflect.Bool:
 		txt := strings.TrimSpace(txt)
-		if txt == "true" || txt == "1" {
+		switch txt {
+		case "true", "1":
 			v, err = true, nil
-		} else if txt != "false" && txt != "0" && txt != "" {
-			v, err = nil, fmt.Errorf("unknown bool value: %s", txt)
-		} else {
+		case "false", "0":
 			v, err = false, nil
+		case "":
+			v, err = false, errEmptyValue
+		default:
+			v, err = nil, fmt.Errorf("unknown bool value: %s", txt)
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		v, err = parseInt(strings.TrimSpace(txt), fieldKind)
@@ -475,19 +500,23 @@ func parsePrimitive(txt string, fieldType reflect.Type) (val reflect.Value, err 
 	case reflect.Float32, reflect.Float64:
 		v, err = parseFloat(strings.TrimSpace(txt), fieldKind)
 	case reflect.String:
-		v, err = txt, nil
+		if txt == "" {
+			v, err = "", errEmptyValue
+		} else {
+			v, err = txt, nil
+		}
 	default:
 		v, err = nil, fmt.Errorf("unsupported primitive field type kind, kind: %v", fieldKind.String())
 	}
-	if err != nil {
+	if v == nil {
 		return reflect.Value{}, err
 	}
-	return reflect.ValueOf(v).Convert(fieldType), nil
+	return reflect.ValueOf(v).Convert(fieldType), err
 }
 
 func parseInt(txt string, kind reflect.Kind) (int64, error) {
 	if txt == "" {
-		return 0, nil
+		return 0, errEmptyValue
 	}
 	var bitSize int
 	switch kind {
@@ -509,7 +538,7 @@ func parseInt(txt string, kind reflect.Kind) (int64, error) {
 
 func parseUint(txt string, kind reflect.Kind) (uint64, error) {
 	if txt == "" {
-		return 0, nil
+		return 0, errEmptyValue
 	}
 	var bitSize int
 	switch kind {
@@ -531,7 +560,7 @@ func parseUint(txt string, kind reflect.Kind) (uint64, error) {
 
 func parseFloat(txt string, kind reflect.Kind) (float64, error) {
 	if txt == "" {
-		return 0, nil
+		return 0, errEmptyValue
 	}
 	var bitSize int
 	switch kind {
